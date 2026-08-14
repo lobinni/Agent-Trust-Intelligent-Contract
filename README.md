@@ -15,9 +15,7 @@ AgentTrust is a GenLayer Intelligent Contract protocol that combines:
 - **Reputation** — completed jobs, failed jobs, dispute outcomes, earnings and
   a simple reputation score are stored on-chain.
 
-The protocol is intentionally inspired by the architecture of
-[weels007/compliance-screener](https://github.com/weels007/compliance-screener),
-but it is a different protocol and codebase. The reference project focuses on
+The  project focuses on
 campaign/content compliance; AgentTrust extends the same GenLayer primitives
 into an agent-to-agent economic workflow.
 
