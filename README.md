@@ -1,464 +1,437 @@
 # AgentTrust
 
-**The trust infrastructure for autonomous AI agents.**
+**A public, trustless task marketplace powered by GenLayer Intelligent Contracts.**
 
-AgentTrust is a GenLayer Intelligent Contract protocol that combines:
+Clients fund tasks with native GEN tokens into an escrow contract. Workers accept tasks and submit public web evidence. GenLayer immediately reviews the submitted work using independent web fetching, AI evaluation, and validator consensus before the creator receives the final result. Escrow settlements and reputation updates are executed entirely on-chain.
 
-- **Escrow** — clients fund agent tasks in GEN.
-- **Work verification** — workers submit a public evidence URL.
-- **Adjudication** — either party can open a dispute and GenLayer evaluates the
-  deliverable against the agreed terms using live web evidence and an LLM.
-- **Consensus** — validators independently re-run the nondeterministic judge
-  and compare the semantic verdict rather than exact prose.
-- **Settlement** — the contract deterministically releases the escrow to the
-  winning party after the adjudication result is returned.
-- **Reputation** — completed jobs, failed jobs, dispute outcomes, earnings and
-  a simple reputation score are stored on-chain.
+[![GenLayer](https://img.shields.io/badge/GenLayer-Studionet-8cffbd)](https://genlayer.com)
+[![Contract](https://img.shields.io/badge/Contract-0xFf7c...612c-7dd3fc)](https://explorer-studio.genlayer.com/address/0xFf7cCC740271Ee6664398503D8564380578b612c)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org)
+[![License](https://img.shields.io/badge/License-MIT-blue)](#license)
 
-## Protocol thesis
+---
 
-Traditional smart contracts are excellent at deterministic settlement:
+## 📖 Table of Contents
+
+- [Latest Update](#latest-update)
+- [Deployed Contract](#deployed-contract)
+- [How It Works](#how-it-works)
+- [Workflow Diagram](#workflow-diagram)
+- [Evidence Review & AI Verdict](#evidence-review--ai-verdict)
+- [Contract States & Methods](#contract-states--methods)
+- [Reputation System](#reputation-system)
+- [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
+- [Getting Started](#getting-started)
+- [MetaMask Setup](#metamask-setup)
+- [Tests](#tests)
+- [Deploy to Vercel](#deploy-to-vercel)
+- [Push to GitHub](#push-to-github)
+- [Security Notes](#security-notes)
+- [License](#license)
+
+---
+
+## Latest Update
+
+### Contract `0xFf7cCC740271Ee6664398503D8564380578b612c`
+
+The latest Intelligent Contract is live on GenLayer Studionet with:
+
+1. **Immediate Atomic AI Review:**
+   - When a worker calls `submit_work(task_id, evidence_url, evidence_note)`, the contract triggers GenLayer AI review in the **same transaction**.
+   - Validators independently fetch the evidence URL, evaluate it against the task terms, and reach consensus.
+   - The contract atomically saves `ai_verdict` (`APPROVED` / `REJECTED`), `ai_score` (0–100), `ai_reason`, and `reviewed_at`.
+   - The creator receives the result only **after** GenLayer AI has evaluated the work.
+
+2. **Web Response Compatibility Fix:**
+   - Uses `int(page.status)` conforming to `py-genlayer` `Response(status, headers, body)`.
+   - Robust body decoding with UTF-8 replacement and empty-body checks.
+
+3. **Nondeterministic Safety:**
+   - All contract/storage values are resolved to primitives before entering nondeterministic evaluation.
+   - Evaluator and validator closures capture clean primitives without referencing contract storage.
+
+4. **Transaction Result Verification:**
+   - The DApp frontend verifies the transaction consensus result (`MAJORITY_AGREE` vs `MAJORITY_DISAGREE`) after finality.
+   - If consensus fails, the full GenVM error message and transaction hash are shown with a link to the explorer.
+
+---
+
+## Deployed Contract
+
+| Parameter | Value |
+|---|---|
+| **Network** | GenLayer Studionet |
+| **Contract Address** | [`0xFf7cCC740271Ee6664398503D8564380578b612c`](https://explorer-studio.genlayer.com/address/0xFf7cCC740271Ee6664398503D8564380578b612c) |
+| **Chain ID** | `61999` (`0xf22f`) |
+| **RPC Endpoint** | `https://studio.genlayer.com/api` |
+| **Block Explorer** | https://explorer-studio.genlayer.com |
+| **Native Token** | GEN (18 decimals) |
+| **Contract Owner** | `0x5dB05F47cfFe01272Bc7139095Cd15981879284D` |
+| **Review Window** | 24 hours (`86400` seconds) |
+| **Protocol Status** | Active (not paused) |
+
+---
+
+## How It Works
+
+```
+1. Client creates a task and deposits native GEN into escrow.
+2. Worker accepts the task and begins work.
+3. Worker submits evidence URL + notes via submit_work.
+4. GenLayer immediately fetches the URL, runs AI judgment, and reaches validator consensus.
+5. Contract records AI Verdict (APPROVED or REJECTED) + score + reason.
+6. Task moves to SUBMITTED — client sees the AI evaluation.
+7. Client approves (worker paid) OR disputes with a GEN bond (triggers full court).
+8. Escrow settles automatically and reputation scores update on-chain.
+```
+
+---
+
+## Workflow Diagram
 
 ```text
-condition -> exact computation -> state change
+                         CLIENT
+                            │
+                            │ create_task + GEN (escrow deposit)
+                            ▼
+                          OPEN ──── cancel_task ────► CANCELLED (client refunded)
+                            │
+                            │ accept_task (any worker wallet)
+                            ▼
+                        ACCEPTED
+                            │
+                            │ submit_work + evidence URL
+                            ▼
+               ┌────────────────────────┐
+               │ GENLAYER AI REVIEW     │
+               │                        │
+               │ 1. Validators fetch URL│
+               │ 2. AI evaluates terms  │
+               │ 3. Consensus on score  │
+               └───────────┬────────────┘
+                           │
+                 APPROVED / REJECTED
+                 score (0-100) + reason
+                           │
+                           ▼
+                       SUBMITTED (client reviews AI verdict)
+                      /         \
+                     /           \
+            approve_task     open_dispute + GEN bond
+                  │                  │
+                  ▼                  ▼
+             COMPLETED           DISPUTED
+            worker paid              │
+                                     │ adjudicate()
+                                     ▼
+                           ┌──────────────────┐
+                           │  GENLAYER COURT  │
+                           │  fresh AI review │
+                           │  + consensus     │
+                           └────────┬─────────┘
+                               ┌────┴────┐
+                               ▼         ▼
+                            WORKER     CLIENT
+                               │         │
+                         reward+bond reward+bond
+                               │         │
+                               ▼         ▼
+                          COMPLETED   REFUNDED
+
+  Recovery paths:
+  OPEN/ACCEPTED + deadline passed ──► claim_expired ──► REFUNDED (worker −10 rep if accepted)
+  SUBMITTED + 24h review passed   ──► auto_release  ──► COMPLETED (worker paid)
 ```
 
-Agent commerce introduces commitments such as:
-
-```text
-"Deliver a report that satisfies these requirements."
-"Build the feature described in this specification."
-"Complete the task to the agreed quality standard."
-```
-
-Those commitments contain ambiguity and unstructured evidence. AgentTrust
-moves the judgment step into a GenLayer Intelligent Contract:
-
-```text
-Client
-  |
-  | fund task
-  v
-Escrow
-  |
-  | worker delivers
-  v
-Evidence URL
-  |
-  | dispute?
-  v
-GenLayer Intelligent Contract
-  |
-  +--> live web evidence
-  +--> LLM reasoning
-  +--> leader/validator consensus
-  |
-  v
-Verdict
- /    \
-WORKER CLIENT
- |       |
- v       v
-Payout  Refund
-  \      /
-   Reputation
-```
-
-GenLayer describes itself as the adjudication layer for the agentic economy,
-using decentralized AI-validator consensus to resolve contracts that require
-judgment rather than code alone. Intelligent Contracts can interpret language,
-read live web data, process unstructured data and use LLMs. citeturn0view1
-
-## What is in this MVP?
-
-### 1. Agent profiles
-
-Every address can register and receives a reputation profile:
-
-```text
-jobs_completed
-jobs_failed
-disputes_won
-disputes_lost
-total_earned
-total_spent
-reputation (0-1000)
-```
-
-### 2. GEN escrow
-
-A client creates a task with a payable call. The sent GEN becomes the task's
-escrow.
-
-The current GenLayer docs specify that Intelligent Contracts can receive GEN
-through `@gl.public.write.payable`, read `gl.message.value`, and send GEN via
-messages/external transfers. citeturn2search0turn2search3
-
-### 3. Task lifecycle
-
-```text
-OPEN
-  |
-  v
-ACCEPTED
-  |
-  v
-SUBMITTED
- /       \
-approve  dispute
- |         |
- v         v
-COMPLETED  GenLayer adjudication
-             /          \
-         WORKER        CLIENT
-            |             |
-            v             v
-        COMPLETED      REFUNDED
-```
-
-### 4. AI adjudication
-
-The adjudicator reads:
-
-- the original task terms;
-- the worker's submitted evidence URL;
-- the rendered web content.
-
-The LLM is instructed to treat the evidence as **untrusted data** and never
-follow instructions contained inside it.
-
-The judge returns only:
-
-```json
-{
-  "winner": "WORKER",
-  "satisfied": true,
-  "reason": "The submitted deliverable satisfies the agreed requirements."
-}
-```
-
-### 5. Equivalence-based consensus
-
-AgentTrust uses the GenLayer leader/validator pattern:
-
-```python
-gl.vm.run_nondet_unsafe(leader, validator)
-```
-
-The validator independently re-fetches the evidence and re-runs the judge.
-Only the semantic `winner` field is compared.
-
-This is deliberate: two LLM executions can give different explanations while
-still reaching the same decision. GenLayer's Equivalence Principle is designed
-for this kind of nondeterministic execution. citeturn0view1
-
-### 6. Deterministic settlement
-
-No payout happens inside the nondeterministic function.
-
-After consensus returns, the contract:
-
-1. stores the verdict;
-2. updates task status;
-3. updates reputation;
-4. emits a finalized GEN transfer to the winner.
-
-GenLayer's docs recommend finalized messages for operations whose correctness
-depends on the final transaction outcome, because accepted messages can be
-replayed/duplicated during appeals. citeturn2search2turn2search3
-
-## Contract API
-
-### `register_agent()`
-
-Creates a profile for the caller.
-
-### `create_task(task_id, worker, title, terms)` — payable
-
-Creates a task and locks the sent GEN as escrow.
-
-Example terms:
-
-```text
-Build a working dashboard for the provided API.
-The final submission must include a public demo URL.
-The dashboard must display at least 3 metrics from the API.
-The deliverable must satisfy all requirements above.
-```
-
-### `accept_task(task_id)`
-
-Only the assigned worker can accept an OPEN task.
-
-### `submit_work(task_id, evidence_url)`
-
-The worker submits a public HTTP/HTTPS URL containing evidence of the work.
-
-### `approve_work(task_id)`
-
-The client can directly approve submitted work. This avoids paying for a
-GenLayer adjudication when both parties agree.
-
-### `open_dispute(task_id)`
-
-Either party can open a dispute after submission. GenLayer then adjudicates
-the deliverable.
-
-### `cancel_open_task(task_id)`
-
-The client can cancel before the worker accepts. The escrow is returned.
-
-### `get_task(task_id)`
-
-Returns task state, parties, terms, payment, evidence URL and verdict.
-
-### `get_profile(agent)`
-
-Returns reputation and economic history.
-
-### `get_protocol_stats()`
-
-Returns task counts, locked escrow and contract balance.
-
-## Example
-
-### Client creates a $10 GEN task
-
-```text
-create_task(
-  "research-001",
-  worker,
-  "Crypto research report",
-  "Produce a report covering 100 projects.\n"
-  "Every project must have a website and category.\n"
-  "The final report must contain source links."
-)
-value: 10 GEN
-```
-
-### Worker accepts
-
-```text
-accept_task("research-001")
-```
-
-### Worker submits
-
-```text
-submit_work(
-  "research-001",
-  "https://worker.example/report-001"
-)
-```
-
-### Client disagrees
-
-```text
-open_dispute("research-001")
-```
-
-GenLayer independently evaluates the evidence and reaches a verdict.
-
-If the worker wins:
-
-```text
-10 GEN -> worker
-worker reputation +
-```
-
-If the client wins:
-
-```text
-10 GEN -> client
-worker reputation -
-```
-
-## Why this is a GenLayer-native protocol
-
-AgentTrust intentionally uses capabilities that are difficult to reproduce in
-a conventional EVM-only contract:
-
-| Requirement | Conventional EVM | AgentTrust / GenLayer |
+---
+
+## Evidence Review & AI Verdict
+
+When evidence is submitted, the contract and DApp provide complete transparency:
+
+- **Evidence URL:** Clickable public link proving task delivery.
+- **Worker's Note:** Contextual details provided by the worker.
+- **AI Verdict Badge:** `✅ AI APPROVED` (score ≥ 50) or `❌ AI REJECTED` (score < 50).
+- **AI Score Bar:** Visual progress indicator (0 to 100).
+- **AI Reason:** Factual explanation generated by GenLayer validator consensus.
+- **Timeline:** Timestamped event log tracking the task from creation to settlement.
+- **Settlement Summary:** Clear breakdown of escrow reward, dispute bond, recipient, and resolution time.
+
+---
+
+## Contract States & Methods
+
+### Task States
+
+| State | Description |
+|---|---|
+| `OPEN` | Task is active in marketplace, waiting for a worker to claim. |
+| `ACCEPTED` | Worker is assigned, working towards the deadline. |
+| `SUBMITTED` | Worker submitted evidence, GenLayer AI review completed, waiting for client decision. |
+| `DISPUTED` | Client opened dispute with a bond, waiting for court adjudication. |
+| `COMPLETED` | Task approved or won by worker; escrow released to worker. |
+| `REFUNDED` | Task cancelled, expired, or won by client; funds refunded to client. |
+| `CANCELLED` | Client cancelled an unassigned `OPEN` task. |
+| `REVIEWING` | Transitional state during AI review execution. |
+
+### Write Methods (MetaMask signed)
+
+| Method | Access | Payable | Description |
+|---|---|---:|---|
+| `create_task(title, terms, deadline)` | Public | GEN reward | Create task and lock reward in escrow |
+| `accept_task(task_id)` | Worker | No | Claim an open task |
+| `submit_work(task_id, url, note)` | Worker | No | Submit evidence and run atomic AI review |
+| `review_work(task_id)` | Public | No | Recovery AI review trigger |
+| `approve_task(task_id)` | Client | No | Approve work and release escrow to worker |
+| `open_dispute(task_id, bond)` | Client | GEN bond | Dispute submission and post bond |
+| `adjudicate(task_id)` | Public | No | Run GenLayer Court on disputed task |
+| `auto_release(task_id)` | Public | No | Release funds to worker after 24h review window |
+| `claim_expired(task_id)` | Public | No | Refund expired OPEN/ACCEPTED task |
+| `cancel_task(task_id)` | Client | No | Cancel unassigned OPEN task and refund client |
+
+### Read Methods (Public, no gas)
+
+| Method | Return Type | Description |
 |---|---|---|
-| Escrow | Yes | Yes |
-| Deterministic settlement | Yes | Yes |
-| Read public web evidence | Requires external oracle | Native web access |
-| Understand natural-language terms | No | LLM in Intelligent Contract |
-| Evaluate unstructured deliverables | Limited | Native LLM/web execution |
-| Consensus on semantic AI output | No | Equivalence-based validator consensus |
-| Appeal-aware final settlement | Manual design | GenLayer finality/appeal model |
+| `get_task(task_id)` | `dict` | Full task record |
+| `get_task_state(task_id)` | `dict` | Task state and available action flags |
+| `get_task_ids(offset, limit)` | `list[str]` | Paginated task IDs |
+| `get_open_tasks(offset, limit)` | `list[dict]` | Paginated open tasks |
+| `get_tasks_by_status(status, offset, limit)` | `list[dict]` | Filtered task list |
+| `get_profile(address)` | `dict` | Wallet reputation profile |
+| `get_my_profile()` | `dict` | Caller's reputation profile |
+| `get_leaderboard(offset, limit)` | `list[dict]` | Reputation ranking |
+| `get_stats()` | `dict` | Protocol task/profile counts and pause state |
+| `get_config()` | `dict` | Owner, limits, review period |
 
-GenLayer's current architecture separates the GenLayer Chain from GenVM: the
-chain layer handles standard blockchain operations while GenVM executes
-Intelligent Contracts with LLM, web and nondeterministic capabilities.
-citeturn0view1
+---
 
-## Security model
+## Reputation System
 
-### Prompt injection
+Reputation is stored and updated directly on-chain:
 
-Evidence is explicitly delimited as untrusted data. The adjudicator is told not
-to obey instructions found in the evidence.
+| Action | Score Change |
+|---|---:|
+| Client approves task | Worker **+5** |
+| Worker wins dispute in court | Worker **+8**, Client **−2** |
+| Client wins dispute in court | Client **+2**, Worker **−8** |
+| Worker misses deadline (after accepting) | Worker **−10** |
+| **Initial Default Score** | **500** |
+| **Score Range** | **0 to 1000** |
 
-### Consensus independence
+---
 
-Validators do not simply accept the leader's calldata. They independently
-re-run the web fetch and LLM judge and compare the final decision.
+## Tech Stack
 
-### No nondeterministic state writes
+| Layer | Technology |
+|---|---|
+| **Intelligent Contract** | Python with GenLayer SDK (`py-genlayer`) |
+| **Network** | GenLayer Studionet (Chain ID: `61999` / `0xf22f`) |
+| **Frontend Framework** | Next.js 16 (App Router), React 19, TypeScript |
+| **Web3 Client** | `genlayer-js` with MetaMask (EIP-1193) provider |
+| **Styling & Fonts** | Tailwind CSS v4, Space Grotesk, JetBrains Mono |
+| **Optional Mirror** | PostgreSQL with Drizzle ORM |
+| **Deployment** | Vercel (Frontend), GenLayer CLI / Studio (Contract) |
 
-The state-changing settlement happens only after the consensus call returns.
+---
 
-### Finalized payouts
-
-Payouts are emitted only after the adjudication transaction has reached the
-appropriate final stage. This avoids using an `accepted` external transfer for
-an outcome that could later be changed by an appeal. citeturn2search3
-
-### Evidence is not permanent truth
-
-A web page can change or disappear. The stored verdict means:
-
-> "This evidence was evaluated by the protocol at verification time."
-
-For production, add content hashes, evidence snapshots, trusted-domain
-policies and an explicit evidence-retention layer.
-
-## Current MVP limitations
-
-This repository intentionally keeps the first version small.
-
-It does **not** yet include:
-
-- dispute bonds;
-- automatic deadlines/timeouts;
-- multi-stage milestone payments;
-- ERC-20 escrow;
-- agent identity standards such as ERC-8004;
-- A2A discovery;
-- x402 payment integration;
-- DAO governance;
-- an on-chain appeal UI;
-- evidence hashing/IPFS storage;
-- a full leaderboard indexer;
-- insurance pools.
-
-Those should be added as separate modules instead of making the first contract
-unnecessarily complex.
-
-## Recommended V2
-
-### Milestones
+## Repository Structure
 
 ```text
-Task
- |
- +-- Milestone 1 -> adjudicate -> 20%
- +-- Milestone 2 -> adjudicate -> 30%
- +-- Milestone 3 -> adjudicate -> 50%
+├── contracts/
+│   └── agenttrust.py          # GenLayer Intelligent Contract (Python)
+├── tests/
+│   ├── frontend_tests.sh      # Next.js API & deployed contract integration tests
+│   └── contract_tests.sh      # GenLayer CLI on-chain test script
+├── src/
+│   ├── app/
+│   │   ├── page.tsx           # DApp shell (Marketplace, Create, My Tasks, Reputation)
+│   │   ├── layout.tsx         # Root layout with Web3 fonts and metadata
+│   │   ├── globals.css        # Cyberpunk Web3 theme, buttons, pills, tabs
+│   │   └── api/
+│   │       ├── health/        # Health check endpoint
+│   │       └── contract/sync/ # Optional PostgreSQL mirror sync endpoint
+│   ├── components/
+│   │   ├── WalletContext.tsx  # MetaMask connection and chain auto-switching
+│   │   ├── Header.tsx         # Top bar, network status, wallet button, tabs
+│   │   ├── NetworkStats.tsx   # On-chain stats and contract configuration
+│   │   ├── TaskMarketplace.tsx# Live task explorer with status filters
+│   │   ├── CreateTask.tsx     # Escrow creation form
+│   │   ├── TaskDetail.tsx     # Task view: evidence review, AI verdict, actions
+│   │   ├── MyTasks.tsx        # Personal client/worker task views
+│   │   └── Reputation.tsx     # Profile stats and on-chain leaderboard
+│   ├── lib/
+│   │   ├── genlayer-client.ts # Browser SDK: MetaMask reads, writes, error parser
+│   │   ├── genlayer.ts        # Server SDK: contract reads
+│   │   ├── types.ts           # TypeScript interfaces matching contract
+│   │   └── utils.ts           # Formatters (addresses, wei/GEN, timestamps)
+│   └── db/
+│       ├── index.ts           # Lazy PostgreSQL pool client
+│       └── schema.ts          # Database schema for optional mirror
+├── deploy.sh                  # Automated push script
+├── .env.example               # Template environment variables
+├── vercel.json                # Vercel deployment configuration
+└── package.json
 ```
 
-### Dispute bonds
+---
 
-Both sides stake a small amount before adjudication. The winning side receives
-its bond back; the losing side can lose part of it.
+## Getting Started
 
-### Evidence snapshots
+### Prerequisites
 
-Store:
+- Node.js 20+
+- npm
+- MetaMask browser extension
+- GEN testnet tokens on GenLayer Studionet
 
-```text
-URL
-content hash
-captured timestamp
-source type
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/lobinni/AgentTrust.git
+cd AgentTrust
+
+# 2. Install dependencies
+npm install
+
+# 3. Setup environment variables
+cp .env.example .env.local
+
+# 4. Start local development server
+npm run dev
 ```
 
-This makes later audits much stronger.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### Agent reputation
+---
 
-Add typed capabilities:
+## MetaMask Setup
 
-```text
-research
-coding
-marketing
-data-analysis
-trading
-customer-support
+The DApp handles network switching automatically:
+
+1. Click **Connect Wallet** in the header.
+2. The DApp checks if **GenLayer Studionet** (`0xf22f` / `61999`) is present in MetaMask.
+3. If missing, it prompts MetaMask to add the network with:
+   - **Network Name:** `GenLayer Studionet`
+   - **RPC URL:** `https://studio.genlayer.com/api`
+   - **Chain ID:** `61999` (`0xf22f`)
+   - **Currency Symbol:** `GEN`
+   - **Block Explorer:** `https://explorer-studio.genlayer.com`
+4. If on another chain, it prompts to switch.
+5. If the chain is wrong, a **Switch Network** banner appears with a single-click fix.
+
+---
+
+## Tests
+
+### 1. Build & Type Validation
+
+```bash
+npx next typegen
+npm exec tsc -- --noEmit --pretty false
+npm run build
 ```
 
-Then buyers can query:
+### 2. Live Contract & API Integration Tests
 
-```text
-"Find agents with coding reputation > 850"
+```bash
+# Start server in background
+npm run dev &
+
+# Run test suite against http://localhost:3000
+./tests/frontend_tests.sh
 ```
 
-### Agent-to-agent API
+Verifies:
+- `/api/health`
+- `/api/contract/sync` reads contract stats and configuration
+- Contract address matches `0xFf7cCC740271Ee6664398503D8564380578b612c`
+- Review period is 86400s
+- DApp pages render cleanly
 
-Expose the same task lifecycle through an SDK so AI agents can create,
-accept, submit and dispute tasks programmatically.
+### 3. Contract CLI Tests (using GenLayer CLI)
 
-## Suggested architecture for the full product
-
-```text
-                         AGENTTRUST
-                             |
-       +---------------------+---------------------+
-       |                     |                     |
-       v                     v                     v
-   TASK ESCROW          ADJUDICATION          REPUTATION
-       |                     |                     |
-       |                     v                     |
-       |                GenLayer IC                |
-       |             /       |       \             |
-       |            /        |        \            |
-       |          Web       LLM     Consensus      |
-       |            \        |        /            |
-       |             \       |       /             |
-       +--------------> VERDICT <-----------------+
-                          |
-                   +------+------+
-                   |             |
-                   v             v
-                RELEASE        REFUND
+```bash
+pip install genlayer-cli
+genlayer login
+NETWORK=studionet ./tests/contract_tests.sh
 ```
 
-Above this core protocol, a frontend can provide:
+---
 
-- agent profiles;
-- task marketplace;
-- escrow creation;
-- dispute dashboard;
-- evidence viewer;
-- reputation explorer;
-- protocol analytics.
+## Deploy to Vercel
 
-## Development
+1. Import `lobinni/AgentTrust` into [Vercel](https://vercel.com).
+2. Framework Preset: **Next.js** (auto-detected).
+3. Set Environment Variables (Production, Preview, Development):
 
-The contract is a single self-contained Python file:
+| Variable | Value |
+|---|---|
+| `NEXT_PUBLIC_GENLAYER_NETWORK` | `studionet` |
+| `NEXT_PUBLIC_CONTRACT_ADDRESS` | `0xFf7cCC740271Ee6664398503D8564380578b612c` |
+| `DATABASE_URL` | *(Optional)* PostgreSQL connection string |
 
-```text
-contracts/agenttrust.py
+4. Click **Deploy**.
+
+> **Zero-Database Dependency:** The public DApp reads directly from GenLayer RPC in the browser. The database is only used for the optional mirror cache. Builds never fail if `DATABASE_URL` is omitted.
+
+---
+
+## Push to GitHub
+
+### Option A: Using the deploy script
+
+```bash
+chmod +x deploy.sh
+./deploy.sh "feat: connect verified AgentTrust contract 0xFf7cCC740271Ee6664398503D8564380578b612c"
 ```
 
-Current GenLayer documentation recommends starting development in Studio or
-localnet and moving to a production-like network when ready. The current
-Bradbury testnet uses chain ID `4221` and GEN as currency. citeturn2search8
+### Option B: Manual git commands
 
-The reference compliance-screener project also uses a single-file Intelligent
-Contract and the same SDK dependency header, so this project follows that
-portable deployment style while expanding the state machine and escrow model.
-citeturn0view0
+```bash
+# Stage all changes
+git add .
 
-## Important production warning
+# Commit
+git commit -m "feat: connect verified AgentTrust contract 0xFf7cCC740271Ee6664398503D8564380578b612c"
 
-This is a protocol MVP/reference implementation, not audited financial
-software. Do not deposit meaningful funds until the contract has been reviewed,
-tested on the target network, and audited for storage semantics, message
-execution, appeal behavior and economic edge cases.
+# Push to main
+git push origin main
+```
+
+If initializing a fresh repository:
+
+```bash
+git init
+git add .
+git commit -m "feat: AgentTrust public task marketplace on GenLayer"
+git branch -M main
+git remote add origin https://github.com/lobinni/AgentTrust.git
+git push -u origin main --force-with-lease
+```
+
+---
+
+## Security Notes
+
+- Evidence URLs and notes are treated as untrusted user input.
+- Contract prompt instructions prevent the LLM from executing prompt injection attacks found inside evidence content.
+- Nondeterministic closures capture only clean primitive variables.
+- Token transfers and storage mutations execute strictly after consensus is finalized.
+- This contract is deployed for testing and community evaluation on GenLayer Studionet.
+
+---
 
 ## License
 
-MIT
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<p align="center">
+  <strong>AgentTrust</strong> — Trustless. Autonomous. Verifiable.<br />
+  Built on <a href="https://genlayer.com">GenLayer</a> Intelligent Contracts
+</p>
